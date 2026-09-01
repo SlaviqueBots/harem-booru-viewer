@@ -1,0 +1,324 @@
+"""Hyprland IPC helpers for the popout window.
+
+Module-level functions that wrap `hyprctl` for window state queries
+and dispatches. Extracted from `popout/window.py` so the popout's Qt
+adapter can call them through a clean import surface and so the state
+machine refactor's `FitWindowToContent` effect handler has a single
+place to find them.
+
+This module DOES touch `subprocess` and `os.environ`, so it's gated
+behind the same `HYPRLAND_INSTANCE_SIGNATURE` env var check the
+legacy code used. Off-Hyprland systems no-op or return None at every
+entry point.
+
+The popout adapter calls these helpers directly; there are no
+`FullscreenPreview._hyprctl_*` shims anymore. Every env-var gate
+for opt-out (`BOORU_VIEWER_NO_HYPR_RULES`, popout-specific aspect
+lock) is implemented inside these functions so every call site
+gets the same behavior.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+
+from ...core.config import hypr_rules_enabled, popout_aspect_lock_enabled
+
+
+def _on_hyprland() -> bool:
+    """True if running under Hyprland (env signature present)."""
+    return bool(os.environ.get("HYPRLAND_INSTANCE_SIGNATURE"))
+
+
+# --- dispatch dialects ------------------------------------------------
+#
+# Hyprland 0.56 replaced the string dispatch API with a Lua one. The old
+# form is now parsed as Lua and dies:
+#
+#   $ hyprctl dispatch setprop address:0x1 keep_aspect_ratio 1
+#   error: [string "return hl.dispatch(setprop address:0x1..."]:1: ')' expected
+#
+# `hyprctl` exits 0 on that error, so nothing downstream can notice by
+# return code — this silently disabled every in-code window dispatch
+# (aspect lock, resize, move, tiling) for 0.56+ users. Verified live
+# 2026_08_20 against Hyprland 0.56.2.
+#
+# Users on older builds still need the legacy strings, so pick the
+# dialect once from a side-effect-free probe rather than parsing the
+# version (git builds make version strings unreliable).
+
+_lua_dialect: bool | None = None
+
+
+def _uses_lua_dispatch() -> bool:
+    """True if this Hyprland wants Lua-form dispatchers.
+
+    Probes with `hyprctl eval`, which only exists on the Lua-era
+    builds; older ones answer "unknown request". Read-only, so it is
+    safe to run at any point. Cached for the process lifetime — the
+    compositor is not going to change under us.
+    """
+    global _lua_dialect
+    if _lua_dialect is not None:
+        return _lua_dialect
+    try:
+        r = subprocess.run(
+            ["hyprctl", "eval", "return 1"],
+            capture_output=True, text=True, timeout=1,
+        )
+        _lua_dialect = "unknown request" not in (r.stdout + r.stderr).lower()
+    except Exception:
+        _lua_dialect = False
+    return _lua_dialect
+
+
+def _setprop(addr: str, prop: str, value: int) -> str:
+    if _uses_lua_dispatch():
+        return (f"dispatch hl.dsp.window.set_prop{{ prop='{prop}', "
+                f"value={value}, window='address:{addr}' }}")
+    return f"dispatch setprop address:{addr} {prop} {value}"
+
+
+def _resize_exact(addr: str, w: int, h: int) -> str:
+    """Absolute pixel resize. `resize{x,y}` is absolute, not a delta —
+    confirmed by applying it twice and seeing the size unchanged."""
+    if _uses_lua_dispatch():
+        return (f"dispatch hl.dsp.window.resize{{ x={w}, y={h}, "
+                f"window='address:{addr}' }}")
+    return f"dispatch resizewindowpixel exact {w} {h},address:{addr}"
+
+
+def _move_exact(addr: str, x: int, y: int) -> str:
+    """Absolute pixel move, same as above."""
+    if _uses_lua_dispatch():
+        return (f"dispatch hl.dsp.window.move{{ x={x}, y={y}, "
+                f"window='address:{addr}' }}")
+    return f"dispatch movewindowpixel exact {x} {y},address:{addr}"
+
+
+def _set_tiled(addr: str) -> str:
+    """Un-float a window.
+
+    The Lua API has no force-tile: `hl.dsp.window.float` TOGGLES, and
+    an unrecognized `state=` key is silently ignored rather than
+    honored. Callers must therefore check `floating` first — every one
+    in this module already does, which is what makes the toggle safe.
+    """
+    if _uses_lua_dispatch():
+        return f"dispatch hl.dsp.window.float{{ window='address:{addr}' }}"
+    return f"dispatch settiled address:{addr}"
+
+
+def get_window(window_title: str) -> dict | None:
+    """Return the Hyprland window dict whose `title` matches.
+
+    Returns None if not on Hyprland, if `hyprctl clients -j` fails,
+    or if no client matches the title. The legacy `_hyprctl_get_window`
+    on `FullscreenPreview` is a 1-line shim around this.
+    """
+    if not _on_hyprland():
+        return None
+    try:
+        result = subprocess.run(
+            ["hyprctl", "clients", "-j"],
+            capture_output=True, text=True, timeout=1,
+        )
+        for c in json.loads(result.stdout):
+            if c.get("title") == window_title:
+                return c
+    except Exception:
+        pass
+    return None
+
+
+def resize(window_title: str, w: int, h: int, animate: bool = False) -> None:
+    """Ask Hyprland to resize the popout and lock its aspect ratio.
+
+    No-op on non-Hyprland systems. Tiled windows skip the resize
+    (fights the layout) but still get the aspect-lock setprop if
+    that's enabled.
+
+    Behavior is gated by two independent env vars (see core/config.py):
+      - BOORU_VIEWER_NO_HYPR_RULES: skip resize and no_anim parts
+      - BOORU_VIEWER_NO_POPOUT_ASPECT_LOCK: skip the keep_aspect_ratio
+        setprop
+
+    Either, both, or neither may be set. The aspect-ratio carve-out
+    means a ricer can opt out of in-code window management while
+    still keeping mpv playback at the right shape (or vice versa).
+    """
+    if not _on_hyprland():
+        return
+    rules_on = hypr_rules_enabled()
+    aspect_on = popout_aspect_lock_enabled()
+    if not rules_on and not aspect_on:
+        return  # nothing to dispatch
+    win = get_window(window_title)
+    if not win:
+        return
+    addr = win.get("address")
+    if not addr:
+        return
+    cmds: list[str] = []
+    if not win.get("floating"):
+        # Tiled — don't resize (fights the layout). Optionally set
+        # aspect lock and no_anim depending on the env vars.
+        if rules_on and not animate:
+            cmds.append(_setprop(addr, "no_anim", 1))
+        if aspect_on:
+            cmds.append(_setprop(addr, "keep_aspect_ratio", 1))
+    else:
+        if rules_on and not animate:
+            cmds.append(_setprop(addr, "no_anim", 1))
+        if aspect_on:
+            cmds.append(_setprop(addr, "keep_aspect_ratio", 0))
+        if rules_on:
+            cmds.append(_resize_exact(addr, w, h))
+        if aspect_on:
+            cmds.append(_setprop(addr, "keep_aspect_ratio", 1))
+    if not cmds:
+        return
+    _dispatch_batch(cmds)
+
+
+def resize_and_move(
+    window_title: str,
+    w: int,
+    h: int,
+    x: int,
+    y: int,
+    win: dict | None = None,
+    animate: bool = False,
+) -> None:
+    """Atomically resize and move the popout via a single hyprctl batch.
+
+    Gated by BOORU_VIEWER_NO_HYPR_RULES (resize/move/no_anim parts)
+    and BOORU_VIEWER_NO_POPOUT_ASPECT_LOCK (the keep_aspect_ratio
+    parts).
+
+    `win` may be passed in by the caller to skip the `get_window`
+    subprocess call. The address is the only thing we actually need
+    from it; threading it through cuts the per-fit subprocess count
+    from three to one and removes ~6ms of GUI-thread blocking every
+    time the popout fits to new content. The legacy
+    `_hyprctl_resize_and_move` on `FullscreenPreview` already used
+    this optimization; the module-level function preserves it.
+    """
+    if not _on_hyprland():
+        return
+    rules_on = hypr_rules_enabled()
+    aspect_on = popout_aspect_lock_enabled()
+    if not rules_on and not aspect_on:
+        return
+    if win is None:
+        win = get_window(window_title)
+    if not win or not win.get("floating"):
+        return
+    addr = win.get("address")
+    if not addr:
+        return
+    cmds: list[str] = []
+    if rules_on and not animate:
+        cmds.append(_setprop(addr, "no_anim", 1))
+    if aspect_on:
+        cmds.append(_setprop(addr, "keep_aspect_ratio", 0))
+    if rules_on:
+        cmds.append(_resize_exact(addr, w, h))
+        cmds.append(_move_exact(addr, x, y))
+    if aspect_on:
+        cmds.append(_setprop(addr, "keep_aspect_ratio", 1))
+    if not cmds:
+        return
+    _dispatch_batch(cmds)
+
+
+def _dispatch_batch(cmds: list[str]) -> None:
+    """Fire-and-forget hyprctl --batch with the given commands.
+
+    Uses `subprocess.Popen` (not `run`) so the call returns
+    immediately without waiting for hyprctl. The current popout code
+    relied on this same fire-and-forget pattern to avoid GUI-thread
+    blocking on every fit dispatch.
+    """
+    try:
+        subprocess.Popen(
+            ["hyprctl", "--batch", " ; ".join(cmds)],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+    except FileNotFoundError:
+        pass
+
+
+def get_monitor_available_rect(monitor_id: int | None = None) -> tuple[int, int, int, int] | None:
+    """Return (x, y, w, h) of a monitor's usable area, accounting for
+    exclusive zones (Waybar, etc.) via the ``reserved`` field.
+
+    Falls back to the first monitor if *monitor_id* is None or not found.
+    Returns None if not on Hyprland or the query fails.
+    """
+    if not _on_hyprland():
+        return None
+    try:
+        result = subprocess.run(
+            ["hyprctl", "monitors", "-j"],
+            capture_output=True, text=True, timeout=1,
+        )
+        monitors = json.loads(result.stdout)
+        if not monitors:
+            return None
+        mon = None
+        if monitor_id is not None:
+            mon = next((m for m in monitors if m.get("id") == monitor_id), None)
+        if mon is None:
+            mon = monitors[0]
+        mx = mon.get("x", 0)
+        my = mon.get("y", 0)
+        mw = mon.get("width", 0)
+        mh = mon.get("height", 0)
+        # reserved: [left, top, right, bottom]
+        res = mon.get("reserved", [0, 0, 0, 0])
+        left, top, right, bottom = res[0], res[1], res[2], res[3]
+        return (
+            mx + left,
+            my + top,
+            mw - left - right,
+            mh - top - bottom,
+        )
+    except Exception:
+        return None
+
+
+def settiled(window_title: str) -> None:
+    """Ask Hyprland to un-float the popout, restoring it to tiled layout.
+
+    Used on reopen when the popout was tiled at close — the windowrule
+    opens it floating, so we dispatch `settiled` to push it back into
+    the layout.
+
+    Gated by BOORU_VIEWER_NO_HYPR_RULES so ricers with their own rules
+    keep control.
+    """
+    if not _on_hyprland():
+        return
+    if not hypr_rules_enabled():
+        return
+    win = get_window(window_title)
+    if not win:
+        return
+    addr = win.get("address")
+    if not addr:
+        return
+    if not win.get("floating"):
+        return
+    _dispatch_batch([_set_tiled(addr)])
+
+
+__all__ = [
+    "get_window",
+    "get_monitor_available_rect",
+    "resize",
+    "resize_and_move",
+    "settiled",
+]

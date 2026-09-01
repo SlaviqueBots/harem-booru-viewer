@@ -1,0 +1,87 @@
+name: windows-build
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e . pyinstaller "httpx[http2]"
+
+      - name: Fetch libmpv
+        shell: pwsh
+        run: |
+          $url = 'https://github.com/zhongfly/mpv-winbuild/releases/download/2026-08-28-e8673660ab/mpv-dev-lgpl-x86_64-20260828-git-e8673660ab.7z'
+          $want = '470437b5dc9f8c74092fdfab668e89bedf7b1a6385a53ffadf241a6a7a4c6ffb'
+          Invoke-WebRequest -Uri $url -OutFile mpv-dev.7z
+          $got = (Get-FileHash mpv-dev.7z -Algorithm SHA256).Hash.ToLower()
+          if ($got -ne $want) { throw "libmpv checksum mismatch: got $got, want $want" }
+          7z x -y mpv-dev.7z libmpv-2.dll
+          if (-not (Test-Path libmpv-2.dll)) { throw "libmpv-2.dll missing after extract" }
+          Write-Host "libmpv-2.dll: $((Get-Item libmpv-2.dll).Length) bytes"
+
+      - name: Build onedir bundle
+        run: pyinstaller --noconfirm harem-booru-viewer.spec
+
+      - name: Verify bundle
+        shell: pwsh
+        run: |
+          if (-not (Test-Path dist/harem-booru-viewer/harem-booru-viewer.exe)) { throw "exe missing" }
+          if (-not (Test-Path dist/harem-booru-viewer/_internal/libmpv-2.dll)) { throw "libmpv missing" }
+
+      - name: Portable zip
+        shell: pwsh
+        run: |
+          if (Test-Path dist/harem-booru-viewer-win64.zip) { Remove-Item dist/harem-booru-viewer-win64.zip }
+          Compress-Archive -Path dist/harem-booru-viewer -DestinationPath dist/harem-booru-viewer-win64.zip
+
+      - name: Locate or install Inno Setup
+        shell: pwsh
+        run: |
+          $iscc = Get-Command iscc -ErrorAction SilentlyContinue
+          if ($iscc) { $path = $iscc.Source }
+          else {
+            $candidates = @(
+              "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
+              "${env:ProgramFiles}\Inno Setup 6\ISCC.exe",
+              "${env:LOCALAPPDATA}\Programs\Inno Setup 6\ISCC.exe"
+            )
+            $path = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+          }
+          if (-not $path) {
+            choco install innosetup --no-progress -y
+            $path = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          }
+          Write-Host "ISCC: $path"
+          "ISCC=$path" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Build installer
+        shell: pwsh
+        run: |
+          & "$env:ISCC" installer.iss
+
+      - name: Attach to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/harem-booru-viewer-setup.exe
+            dist/harem-booru-viewer-win64.zip
+          fail_on_unmatched_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

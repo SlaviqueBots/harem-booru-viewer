@@ -1,0 +1,25 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "harem-booru-viewer"  # HAREM_FORK
+version = "0.3.1+harem"  # upstream 0.3.1 + Harem fork
+description = "Harem fork of booru-viewer — Danbooru/Rule34 defaults + Link Bridge toolbar"
+requires-python = ">=3.11"
+dependencies = [
+    "httpx>=0.27,<1.0",
+    "Pillow>=10.0,<12.0",
+    "PySide6>=6.6,<7.0",
+    "python-mpv>=1.0,<2.0",
+]
+
+[project.scripts]
+booru-viewer = "booru_viewer.main_gui:main"
+harem-booru-viewer = "booru_viewer.main_gui:main"  # HAREM_FORK
+
+[tool.hatch.build.targets.wheel]
+packages = ["booru_viewer"]
+
+[tool.hatch.build.targets.sdist]
+include = ["booru_viewer"]

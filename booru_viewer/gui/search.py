@@ -1,0 +1,231 @@
+"""Search bar with tag autocomplete, history, and saved searches."""
+
+from __future__ import annotations
+
+from PySide6.QtCore import Qt, Signal, QTimer, QStringListModel
+from PySide6.QtGui import QIcon
+from PySide6.QtWidgets import (
+    QWidget,
+    QHBoxLayout,
+    QLineEdit,
+    QPushButton,
+    QCompleter,
+    QMenu,
+    QInputDialog,
+)
+
+from ..core.db import Database
+
+
+class _TagCompleter(QCompleter):
+    """Completer that operates on the last space-separated tag only.
+
+    When the user types "blue_sky tre", the completer matches against
+    "tre" and the popup shows suggestions for that fragment. Accepting
+    a suggestion replaces only the last tag, preserving everything
+    before the final space.
+    """
+
+    def splitPath(self, path: str) -> list[str]:
+        return [path.split()[-1]] if path.split() else [""]
+
+    def pathFromIndex(self, index) -> str:
+        completion = super().pathFromIndex(index)
+        text = self.widget().text()
+        parts = text.split()
+        if parts:
+            parts[-1] = completion
+        else:
+            parts = [completion]
+        return " ".join(parts) + " "
+
+
+class SearchBar(QWidget):
+    """Tag search bar with autocomplete, history dropdown, and saved searches."""
+
+    search_requested = Signal(str)
+    autocomplete_requested = Signal(str)
+
+    def __init__(self, db: Database | None = None, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._db = db
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+
+        self._input = QLineEdit()
+        self._input.setPlaceholderText("Search tags...")
+        self._input.returnPressed.connect(self._do_search)
+
+        # Dropdown arrow inside search bar
+        from PySide6.QtGui import QPixmap, QPainter, QFont
+        pixmap = QPixmap(16, 16)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pixmap)
+        painter.setPen(self._input.palette().color(self._input.palette().ColorRole.Text))
+        painter.setFont(QFont(self._input.font().family(), 8))
+        painter.drawText(pixmap.rect(), Qt.AlignmentFlag.AlignCenter, "\u25BC")
+        painter.end()
+        self._history_action = self._input.addAction(
+            QIcon(pixmap),
+            QLineEdit.ActionPosition.TrailingPosition,
+        )
+        self._history_action.setToolTip("Search history & saved searches")
+        self._history_action.triggered.connect(self._show_history_menu)
+
+        layout.addWidget(self._input, stretch=1)
+
+        # Save search button
+        self._save_btn = QPushButton("Save")
+        self._save_btn.setFixedWidth(60)
+        self._save_btn.setToolTip("Save current search")
+        self._save_btn.clicked.connect(self._save_current_search)
+        layout.addWidget(self._save_btn)
+
+        self._btn = QPushButton("Search")
+        self._btn.clicked.connect(self._do_search)
+        layout.addWidget(self._btn)
+
+        # Autocomplete — _TagCompleter only completes the last tag,
+        # preserving previous tags in multi-tag queries.
+        self._completer_model = QStringListModel()
+        self._completer = _TagCompleter(self._completer_model)
+        self._completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+        self._completer.setCompletionMode(QCompleter.CompletionMode.PopupCompletion)
+        self._input.setCompleter(self._completer)
+
+        # Debounce
+        self._ac_timer = QTimer()
+        self._ac_timer.setSingleShot(True)
+        self._ac_timer.setInterval(300)
+        self._ac_timer.timeout.connect(self._request_autocomplete)
+        self._input.textChanged.connect(self._on_text_changed)
+
+    def _on_text_changed(self, text: str) -> None:
+        if text.endswith(" "):
+            self._completer_model.setStringList([])
+            return
+        self._ac_timer.start()
+
+    def _request_autocomplete(self) -> None:
+        text = self._input.text().strip()
+        if not text:
+            return
+        last_tag = text.split()[-1] if text.split() else ""
+        query = last_tag.lstrip("-")
+        if len(query) >= 2:
+            self.autocomplete_requested.emit(query)
+
+    def set_suggestions(self, suggestions: list[str]) -> None:
+        self._completer_model.setStringList(suggestions)
+
+    def _do_search(self) -> None:
+        query = self._input.text().strip()
+        if self._db and query and self._db.get_setting_bool("search_history_enabled"):
+            self._db.add_search_history(query)
+        self.search_requested.emit(query)
+
+    def _show_history_menu(self) -> None:
+        if not self._db:
+            return
+
+        menu = QMenu(self)
+        saved_actions = {}
+        hist_actions = {}
+
+        # Saved searches
+        saved = self._db.get_saved_searches()
+        if saved:
+            saved_header = menu.addAction("-- Saved Searches --")
+            saved_header.setEnabled(False)
+            for sid, name, query in saved:
+                a = menu.addAction(f"  {name}  ({query})")
+                saved_actions[id(a)] = (sid, query)
+            menu.addSeparator()
+
+        # History (only shown when the setting is on)
+        history = self._db.get_search_history() if self._db.get_setting_bool("search_history_enabled") else []
+        if history:
+            hist_header = menu.addAction("-- Recent --")
+            hist_header.setEnabled(False)
+            for query in history:
+                a = menu.addAction(f"  {query}")
+                hist_actions[id(a)] = query
+            menu.addSeparator()
+            clear_action = menu.addAction("Clear History")
+        else:
+            clear_action = None
+
+        # Management actions
+        delete_saved = None
+        if saved:
+            delete_saved = menu.addAction("Manage Saved Searches...")
+            menu.addSeparator()
+
+        if not saved and not history:
+            empty = menu.addAction("No history yet")
+            empty.setEnabled(False)
+
+        action = menu.exec(self._input.mapToGlobal(self._input.rect().bottomLeft()))
+        if not action:
+            return
+
+        if clear_action and action == clear_action:
+            self._db.clear_search_history()
+        elif delete_saved and action == delete_saved:
+            self._delete_saved_search_dialog()
+        elif id(action) in hist_actions:
+            self._input.setText(hist_actions[id(action)])
+            self._do_search()
+        elif id(action) in saved_actions:
+            _, query = saved_actions[id(action)]
+            self._input.setText(query)
+            self._do_search()
+
+    def _delete_saved_search_dialog(self) -> None:
+        from PySide6.QtWidgets import QListWidget, QDialog, QVBoxLayout, QDialogButtonBox
+        saved = self._db.get_saved_searches()
+        if not saved:
+            return
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Delete Saved Searches")
+        dlg.setMinimumWidth(300)
+        layout = QVBoxLayout(dlg)
+        lst = QListWidget()
+        for sid, name, query in saved:
+            lst.addItem(f"{name}  ({query})")
+        layout.addWidget(lst)
+        btns = QDialogButtonBox()
+        delete_btn = btns.addButton("Delete Selected", QDialogButtonBox.ButtonRole.DestructiveRole)
+        btns.addButton(QDialogButtonBox.StandardButton.Close)
+        btns.rejected.connect(dlg.reject)
+        layout.addWidget(btns)
+
+        def _delete():
+            row = lst.currentRow()
+            if 0 <= row < len(saved):
+                self._db.remove_saved_search(saved[row][0])
+                lst.takeItem(row)
+                saved.pop(row)
+
+        delete_btn.clicked.connect(_delete)
+        dlg.exec()
+
+    def _save_current_search(self) -> None:
+        if not self._db:
+            return
+        query = self._input.text().strip()
+        if not query:
+            return
+        name, ok = QInputDialog.getText(self, "Save Search", "Name:", text=query)
+        if ok and name.strip():
+            self._db.add_saved_search(name.strip(), query)
+
+    def text(self) -> str:
+        return self._input.text().strip()
+
+    def set_text(self, text: str) -> None:
+        self._input.setText(text)
+
+    def focus(self) -> None:
+        self._input.setFocus()
