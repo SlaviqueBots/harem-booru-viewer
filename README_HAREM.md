@@ -1,17 +1,18 @@
 # Harem booru-viewer
 
-Desktop booru client for Harem Link Bridge users. Based on
-[pxlwh/booru-viewer](https://github.com/pxlwh/booru-viewer) v0.3.1.
+Desktop booru browser (Danbooru + Rule34) with one-click actions into Harem Link Bridge. Fork of [pxlwh/booru-viewer](https://github.com/pxlwh/booru-viewer).
 
 ## Harem changes
 
-- **Danbooru** and **Rule34** are pre-added as sites (no manual setup).
-- Preview and popout viewers include **Harem Link Bridge** in the right-click menu (`checkres`, `conjure`, `both`, `craft`) — same behaviour as the browser userscript.
-- Data is stored under `%APPDATA%\harem-booru-viewer\` (Windows) or `~/.local/share/harem-booru-viewer/` (Linux), separate from stock booru-viewer.
+- **Default sites** — Danbooru and Rule34 are pre-added; no manual setup.
+- **Bridge buttons** — preview and popout viewers get `checkres`, `conjure`, `both`, `craft` (same as the browser userscript). Needs Harem Link Bridge running.
+- **Quick Tags** (Danbooru) — right-click a post, apply a preset tag combo through the Danbooru API (add-only, never removes). Combos live under File > Settings > Quick Tags; needs a Danbooru API user + key under File > Manage Sites.
+- **Tag Bookmarks** — bookmark any tag from the info panel; saved tags get a tab with per-tag random previews.
+- **High-resolution thumbnails** — on by default (File > Settings); pulls samples/originals instead of ~150px previews.
+- **Extra keybinds** — arrows flip pages, Shift+arrows seek images. See `KEYBINDS.md`.
+- **Separate data dir** — `%APPDATA%\harem-booru-viewer\` (Windows) or `~/.local/share/harem-booru-viewer/` (Linux); stock booru-viewer data is untouched.
 
-The browser userscript is optional; nothing in Bridge is removed.
-
-## Quick start (dev)
+## Quick start
 
 ```powershell
 cd harem-booru-viewer
@@ -20,16 +21,10 @@ python -m venv .venv
 .\.venv\Scripts\harem-booru-viewer
 ```
 
-1. Start **Harem Link Bridge** (system tray).
-2. Launch **harem-booru-viewer**.
-3. Pick Danbooru or Rule34, search, open a post, use the bridge buttons.
+Requires **mpv** on PATH (same as upstream). Start Harem Link Bridge first if you want the bridge buttons.
 
-Rule34 may need API credentials under **File → Manage Sites** (same as upstream).
+## Docs
 
-## Updating from upstream
-
-See **[FORK_GUIDE.md](FORK_GUIDE.md)** — give that file plus this directory to an agent with “fork the new version”.
-
-## Full upstream documentation
-
-See [README.md](README.md) for themes, keybinds, Hyprland, and the rest of stock booru-viewer.
+- [Upstream README](https://github.com/pxlwh/booru-viewer#readme) — full stock documentation (themes, Hyprland).
+- [FORK_GUIDE.md](FORK_GUIDE.md) — maintainer notes for rebasing onto new upstream releases.
+- [KEYBINDS.md](KEYBINDS.md) — key bindings.

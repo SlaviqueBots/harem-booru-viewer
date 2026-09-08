@@ -1,7 +1,6 @@
 # Fork guide — rebasing Harem booru-viewer onto upstream
 
-This document is the **source of truth** for agents (and humans) updating
-`harem-booru-viewer/` when [pxlwh/booru-viewer](https://github.com/pxlwh/booru-viewer)
+Maintainer playbook for updating `harem-booru-viewer/` when [pxlwh/booru-viewer](https://github.com/pxlwh/booru-viewer)
 ships a new release.
 
 ## Repositories and paths
@@ -9,7 +8,7 @@ ships a new release.
 | Item | Value |
 |------|--------|
 | Upstream | `https://github.com/pxlwh/booru-viewer` |
-| Harem fork (this tree) | `slavique-harem-bot/harem-booru-viewer/` |
+| Harem fork | this repo (`harem-booru-viewer/` in the monorepo) |
 | Harem-only package | `booru_viewer/harem/` |
 | Browser userscript (do not modify for viewer work) | `link_bridge/userscript/harem_bridge_send.user.js` |
 | Bridge hook server | `link_bridge/browser_hook.py` (port **8767**, path `/send`) |
@@ -51,6 +50,7 @@ After every upstream merge, verify these markers still exist and compile:
 | `booru_viewer/gui/preview_pane.py` | `append_bridge_actions` at top of RMB menu + signal |
 | `booru_viewer/gui/popout/window.py` | Same in popout RMB menu |
 | `booru_viewer/gui/settings.py` | Thumbnail max 500px, optional scroll speed multiplier (HAREM_FORK) |
+| `booru_viewer/gui/sites.py` | Per-site results-per-page spinbox (HAREM_FORK) |
 | `booru_viewer/gui/main_window.py` | `HaremBridgeController`, signal wiring |
 | `booru_viewer/gui/popout_controller.py` | Connect popout `harem_bridge_requested` |
 | `booru_viewer/main_gui.py` | `SetCurrentProcessExplicitAppUserModelID(u"slavique.harem-booru-viewer.gui.1")` |
@@ -63,7 +63,7 @@ cd harem-booru-viewer
 rg "HAREM_FORK" -n
 ```
 
-## Rebase procedure (agent checklist)
+## Rebase procedure
 
 ### 1. Record versions
 
@@ -76,7 +76,7 @@ rg "HAREM_FORK" -n
 git clone --depth 1 --branch v0.3.2 https://github.com/pxlwh/booru-viewer.git /tmp/booru-viewer-upstream
 ```
 
-Use the tag the user requested; if none, use latest release tag.
+Use the requested tag, or the latest release tag if none was given.
 
 ### 3. Merge strategy
 
