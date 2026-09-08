@@ -9,7 +9,7 @@ Desktop Danbooru/Rule34 browser with one-click actions into Harem Link Bridge. F
 - **Sites ready to go** — Danbooru and Rule34 pre-added; no manual setup.
 - **Bridge buttons** — preview and popout viewers get `checkres`, `conjure`, `both`, `craft`, posting to Harem Link Bridge. Same contract as the browser userscript, which keeps working untouched.
 - **Quick Tags** (Danbooru) — apply preset tag combos through the Danbooru API (add-only, never removes). Needs an API user + key under File > Manage Sites.
-- **Slow Tag + eyedropper** — free-text tagging dialog with live autocomplete (Space), middle-click tagging, number keys 1–5 for combos, pixel color picker (for when you can't decide what color of the background it is, useful for tagging images), transparency badges.
+- **Slow Tag + eyedropper** — free-text tagging dialog with live autocomplete (Space), middle-click tagging, number keys 1–5 for combos, pixel color picker (for when you can't decide what color of the background it is, useful for tagging images), transparency badges - makes it easy to understand if the image uses transparency layers at a glance (so that you don't tag an image with transparent_background as a white_background one by mistake).
 - **Tag Bookmarks** — bookmark tags from the info panel; per-tag random previews.
 - **High-resolution thumbnails** — on by default; samples/originals instead of ~150px previews.
 - **Keybinds** — arrow/hjkl navigation, RU layout supported (Ы=S, …). See [KEYBINDS.md](KEYBINDS.md).
